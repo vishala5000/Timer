@@ -14,6 +14,9 @@ import android.text.TextPaint
 import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.min
+import kotlin.math.sin
 
 class VideoGenerator(private val context: Context) {
 
@@ -25,22 +28,26 @@ class VideoGenerator(private val context: Context) {
         const val FRAME_RATE = 30
         const val I_FRAME_INTERVAL = 1
         private const val BIT_RATE = 8_000_000
+        
         private const val AUDIO_SAMPLE_RATE = 44100
         private const val AUDIO_BIT_RATE = 128_000
+        private const val BEEP_FREQ = 880f
+        private const val FINAL_BEEP_FREQ = 1320f
+        private const val BEEP_DURATION_MS = 120
+        private const val FINAL_BEEP_DURATION_MS = 400
+        private const val AMPLITUDE = 0.6f
     }
 
     private val typeface: Typeface by lazy {
-        try {
-            Typeface.createFromAsset(context.assets, "font.ttf")
-        } catch (e: Exception) {
-            Typeface.DEFAULT_BOLD
-        }
+        try { Typeface.createFromAsset(context.assets, "font.ttf") } 
+        catch (e: Exception) { Typeface.DEFAULT_BOLD }
     }
 
     fun generate(durationSeconds: Int, outputFile: File, onProgress: (Int) -> Unit) {
+        if (durationSeconds <= 0) return
         outputFile.delete()
 
-        // 1. Video Encoder Setup
+        // 1. Video Encoder
         val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
@@ -49,10 +56,10 @@ class VideoGenerator(private val context: Context) {
         }
         val videoCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         videoCodec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val inputSurface: Surface = videoCodec.createInputSurface()
+        val inputSurface = videoCodec.createInputSurface()
         videoCodec.start()
 
-        // 2. Audio Encoder Setup
+        // 2. Audio Encoder
         val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT_RATE)
@@ -62,109 +69,128 @@ class VideoGenerator(private val context: Context) {
         audioCodec.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         audioCodec.start()
 
-        // 3. Muxer Setup
+        // 3. Muxer
         val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var videoTrackIndex = -1
         var audioTrackIndex = -1
         var muxerStarted = false
 
-        // 4. Text Painting Setup
+        // 4. Text Paint (160f ensures 2 lines fit perfectly in 480px height)
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             typeface = this@VideoGenerator.typeface
-            textSize = 240f
-            isAntiAlias = true
+            textSize = 160f
         }
 
-        // 5. Pre-generate Audio
-        val fullAudioSamples = AudioGenerator.generateFullAudio(durationSeconds)
-        var audioSamplesWritten = 0
-        val totalAudioSamples = fullAudioSamples.size
         val totalFrames = durationSeconds * FRAME_RATE
-
-        var videoInputDone = false
-        var audioInputDone = false
-        var videoOutputDone = false
-        var audioOutputDone = false
+        val totalAudioSamples = (durationSeconds.toLong() * AUDIO_SAMPLE_RATE)
+        
+        var frameIndex = 0
+        var currentAudioSample = 0L
+        var videoEosQueued = false
+        var audioEosQueued = false
+        var videoEosReceived = false
+        var audioEosReceived = false
         val info = MediaCodec.BufferInfo()
 
         try {
-            for (frameIndex in 0..totalFrames) {
-                val remainingSeconds = durationSeconds - (frameIndex / FRAME_RATE)
-                val timeText = formatTime(remainingSeconds)
-                val label = if (frameIndex == 0) "GET READY" else "SECONDS LEFT"
-                val fullText = "$timeText\n$label"
-
-                // Draw Frame
-                val surfaceCanvas = inputSurface.lockCanvas(null)
-                surfaceCanvas.drawColor(Color.BLACK)
+            while (!videoEosReceived || !audioEosReceived) {
                 
-                val textAreaX = (VIDEO_WIDTH - TEXT_WIDTH) / 2f
-                val textAreaY = (VIDEO_HEIGHT - TEXT_HEIGHT) / 2f
-
-                val layout = StaticLayout.Builder
-                    .obtain(fullText, 0, fullText.length, paint, TEXT_WIDTH)
-                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                    .setLineSpacing(0f, 1.1f)
-                    .setMaxLines(4)
-                    .build()
-
-                val layoutY = textAreaY + (TEXT_HEIGHT - layout.height) / 2f
-                surfaceCanvas.save()
-                surfaceCanvas.translate(textAreaX, layoutY)
-                layout.draw(surfaceCanvas)
-                surfaceCanvas.restore()
-                inputSurface.unlockCanvasAndPost(surfaceCanvas)
-
-                val presentationTimeUs = (frameIndex * 1_000_000L) / FRAME_RATE
-
-                // Feed Video
-                if (!videoInputDone) {
+                // --- FEED VIDEO ---
+                if (!videoEosQueued) {
                     val inIdx = videoCodec.dequeueInputBuffer(10000)
                     if (inIdx >= 0) {
-                        val flags = if (frameIndex == totalFrames) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                        videoCodec.queueInputBuffer(inIdx, 0, 0, presentationTimeUs, flags)
-                        if (flags != 0) videoInputDone = true
+                        val isEos = (frameIndex > totalFrames)
+                        val flags = if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
+                        videoCodec.queueInputBuffer(inIdx, 0, 0, (frameIndex * 1_000_000L) / FRAME_RATE, flags)
+                        if (isEos) videoEosQueued = true else frameIndex++
                     }
                 }
 
-                // Feed Audio
-                if (!videoInputDone) {
-                    val samplesPerFrame = AUDIO_SAMPLE_RATE / FRAME_RATE
-                    var produced = 0
-                    while (produced < samplesPerFrame && audioSamplesWritten < totalAudioSamples) {
-                        val inIdx = audioCodec.dequeueInputBuffer(10000)
-                        if (inIdx >= 0) {
-                            val chunk = minOf(samplesPerFrame - produced, totalAudioSamples - audioSamplesWritten)
-                            val inBuf = audioCodec.getInputBuffer(inIdx)!!
-                            inBuf.clear()
-                            inBuf.asShortBuffer().put(fullAudioSamples, audioSamplesWritten, chunk)
-                            
-                            val timeUs = (audioSamplesWritten.toLong() * 1_000_000L) / AUDIO_SAMPLE_RATE
-                            audioCodec.queueInputBuffer(inIdx, 0, chunk * 2, timeUs, 0)
-                            
-                            audioSamplesWritten += chunk
-                            produced += chunk
-                        } else break
-                    }
-                }
-
-                // Signal Audio EOS
-                if (videoInputDone && audioSamplesWritten >= totalAudioSamples && !audioInputDone) {
+                // --- FEED AUDIO (On-the-fly, 0 MB memory overhead) ---
+                if (!audioEosQueued && currentAudioSample < totalAudioSamples) {
                     val inIdx = audioCodec.dequeueInputBuffer(10000)
                     if (inIdx >= 0) {
-                        audioCodec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        audioInputDone = true
+                        val inBuf = audioCodec.getInputBuffer(inIdx)!!
+                        inBuf.clear()
+                        inBuf.order(ByteOrder.LITTLE_ENDIAN) // CRITICAL for Android AAC
+                        
+                        val maxSamples = inBuf.remaining() / 2
+                        val remaining = (totalAudioSamples - currentAudioSample).toInt()
+                        val chunkSamples = min(maxSamples, remaining)
+                        
+                        val shortBuf = inBuf.asShortBuffer()
+                        for (i in 0 until chunkSamples) {
+                            val sec = (currentAudioSample / AUDIO_SAMPLE_RATE).toInt()
+                            val sampleInSec = (currentAudioSample % AUDIO_SAMPLE_RATE).toInt()
+                            val isFinal = (sec == durationSeconds - 1)
+                            val durSamples = (if (isFinal) FINAL_BEEP_DURATION_MS else BEEP_DURATION_MS) * AUDIO_SAMPLE_RATE / 1000
+                            val freq = if (isFinal) FINAL_BEEP_FREQ else BEEP_FREQ
+                            
+                            if (sampleInSec < durSamples) {
+                                val t = sampleInSec.toFloat() / AUDIO_SAMPLE_RATE
+                                val env = when {
+                                    (sampleInSec.toFloat() / durSamples) < 0.05f -> (sampleInSec.toFloat() / durSamples) / 0.05f
+                                    (sampleInSec.toFloat() / durSamples) < 0.85f -> 1f
+                                    else -> (1f - (sampleInSec.toFloat() / durSamples)) / 0.15f
+                                }
+                                val value = (AMPLITUDE * env * sin(2.0 * Math.PI * freq * t)).toFloat()
+                                shortBuf.put((value * Short.MAX_VALUE).toInt().toShort())
+                            } else {
+                                shortBuf.put(0) // Silence between beeps
+                            }
+                            currentAudioSample++
+                        }
+                        
+                        val bytesWritten = chunkSamples * 2
+                        val startSample = currentAudioSample - chunkSamples
+                        val timeUs = (startSample * 1_000_000L) / AUDIO_SAMPLE_RATE
+                        val isEos = (currentAudioSample >= totalAudioSamples)
+                        
+                        audioCodec.queueInputBuffer(inIdx, 0, bytesWritten, timeUs, if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0)
+                        if (isEos) audioEosQueued = true
                     }
                 }
 
-                // Drain Codecs
-                drainCodec(videoCodec, info, 
+                // --- DRAW FRAME (Only if video not EOS) ---
+                if (!videoEosQueued) {
+                    val remainingSeconds = durationSeconds - ((frameIndex - 1) / FRAME_RATE)
+                    val timeText = if (remainingSeconds > 0) {
+                        val m = remainingSeconds / 60
+                        val s = remainingSeconds % 60
+                        if (m > 0) String.format("%d:%02d", m, s) else s.toString()
+                    } else "0"
+                    val label = if (frameIndex == 1) "GET READY" else "SECONDS LEFT"
+                    val fullText = "$timeText\n$label"
+
+                    val surfaceCanvas = inputSurface.lockCanvas(null)
+                    surfaceCanvas.drawColor(Color.BLACK)
+                    
+                    val textAreaX = (VIDEO_WIDTH - TEXT_WIDTH) / 2f
+                    val textAreaY = (VIDEO_HEIGHT - TEXT_HEIGHT) / 2f
+
+                    val layout = StaticLayout.Builder
+                        .obtain(fullText, 0, fullText.length, paint, TEXT_WIDTH)
+                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                        .setLineSpacing(0f, 1.1f)
+                        .build()
+
+                    val layoutY = textAreaY + (TEXT_HEIGHT - layout.height) / 2f
+                    surfaceCanvas.save()
+                    surfaceCanvas.translate(textAreaX, layoutY)
+                    layout.draw(surfaceCanvas)
+                    surfaceCanvas.restore()
+                    inputSurface.unlockCanvasAndPost(surfaceCanvas)
+                }
+
+                // --- DRAIN VIDEO ---
+                drainCodec(videoCodec, info,
                     onFormat = { fmt -> videoTrackIndex = muxer.addTrack(fmt) },
                     onFrame = { buf, bi -> if (muxerStarted && videoTrackIndex >= 0) muxer.writeSampleData(videoTrackIndex, buf, bi) },
-                    onEos = { videoOutputDone = true }
+                    onEos = { videoEosReceived = true }
                 )
 
+                // --- DRAIN AUDIO ---
                 drainCodec(audioCodec, info,
                     onFormat = { fmt -> 
                         audioTrackIndex = muxer.addTrack(fmt)
@@ -174,11 +200,12 @@ class VideoGenerator(private val context: Context) {
                         }
                     },
                     onFrame = { buf, bi -> if (muxerStarted && audioTrackIndex >= 0) muxer.writeSampleData(audioTrackIndex, buf, bi) },
-                    onEos = { audioOutputDone = true }
+                    onEos = { audioEosReceived = true }
                 )
 
-                if (frameIndex % 15 == 0) onProgress((frameIndex * 100) / totalFrames)
-                if (videoOutputDone && audioOutputDone) break
+                if (frameIndex % 15 == 0) {
+                    onProgress(min(100, (frameIndex * 100) / totalFrames))
+                }
             }
         } finally {
             inputSurface.release()
@@ -214,11 +241,5 @@ class VideoGenerator(private val context: Context) {
                 else -> break
             }
         }
-    }
-
-    private fun formatTime(seconds: Int): String {
-        val m = seconds / 60
-        val s = seconds % 60
-        return if (m > 0) String.format("%d:%02d", m, s) else s.toString()
     }
 }
