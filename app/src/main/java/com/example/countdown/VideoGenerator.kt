@@ -132,8 +132,9 @@ class VideoGenerator(private val context: Context) {
                     inputSurface.unlockCanvasAndPost(surfaceCanvas)
 
                     frameIndex++
+                    // ✅ FIXED: Call instance method on videoCodec, not static MediaCodec
                     if (frameIndex >= totalFrames) {
-                        MediaCodec.signalEndOfInputStream(inputSurface)
+                        videoCodec.signalEndOfInputStream()
                         videoEosQueued = true
                     }
                 }
