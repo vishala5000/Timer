@@ -1,53 +1,43 @@
 package com.example.countdown
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.sin
 
 object AudioGenerator {
-
     const val SAMPLE_RATE = 44100
-    private const val BEEP_FREQ = 880f          // Hz
-    private const val FINAL_BEEP_FREQ = 1320f   // Hz (higher for final beep)
+    private const val BEEP_FREQ = 880f          // Standard beep
+    private const val FINAL_BEEP_FREQ = 1320f   // Higher pitch for final second
     private const val BEEP_DURATION_MS = 120
     private const val FINAL_BEEP_DURATION_MS = 400
     private const val AMPLITUDE = 0.6f
 
     /**
-     * Generates a short beep as PCM 16-bit mono samples.
+     * Pre-generates the entire audio track in memory. 
+     * For 60 seconds, this is only ~5.2 MB, perfectly safe for Android heap.
      */
-    fun generateBeep(isFinal: Boolean = false): ShortArray {
-        val durationMs = if (isFinal) FINAL_BEEP_DURATION_MS else BEEP_DURATION_MS
-        val freq = if (isFinal) FINAL_BEEP_FREQ else BEEP_FREQ
-        val totalSamples = (SAMPLE_RATE * durationMs / 1000)
+    fun generateFullAudio(durationSeconds: Int): ShortArray {
+        val totalSamples = durationSeconds * SAMPLE_RATE
         val samples = ShortArray(totalSamples)
-
-        for (i in 0 until totalSamples) {
-            val t = i.toFloat() / SAMPLE_RATE
-            // Apply envelope to avoid clicks
-            val env = envelope(i.toFloat() / totalSamples.toFloat())
-            val value = (AMPLITUDE * env * sin(2.0 * Math.PI * freq * t)).toFloat()
-            samples[i] = (value * Short.MAX_VALUE).toInt().toShort()
+        
+        for (sec in 0 until durationSeconds) {
+            val isFinalBeep = (sec == durationSeconds - 1)
+            val beepDurationSamples = (if (isFinalBeep) FINAL_BEEP_DURATION_MS else BEEP_DURATION_MS) * SAMPLE_RATE / 1000
+            val freq = if (isFinalBeep) FINAL_BEEP_FREQ else BEEP_FREQ
+            
+            for (i in 0 until beepDurationSamples.toInt()) {
+                val sampleIndex = sec * SAMPLE_RATE + i
+                if (sampleIndex >= totalSamples) break
+                
+                val t = i.toFloat() / SAMPLE_RATE
+                val env = envelope(i.toFloat() / beepDurationSamples.toFloat())
+                val value = (AMPLITUDE * env * sin(2.0 * Math.PI * freq * t)).toFloat()
+                samples[sampleIndex] = (value * Short.MAX_VALUE).toInt().toShort()
+            }
         }
         return samples
     }
-
-    /** Generates silence as PCM samples. */
-    fun generateSilence(durationMs: Int): ShortArray {
-        val totalSamples = (SAMPLE_RATE * durationMs / 1000)
-        return ShortArray(totalSamples)
-    }
-
-    /** Converts PCM shorts to ByteBuffer (16-bit LE). */
-    fun pcmToByteBuffer(samples: ShortArray): ByteBuffer {
-        val buffer = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        for (s in samples) buffer.putShort(s)
-        buffer.flip()
-        return buffer
-    }
-
+    
     private fun envelope(x: Float): Float {
-        // Attack 5%, sustain 80%, release 15%
+        // Attack 5%, sustain 80%, release 15% to prevent audio "clicking"
         return when {
             x < 0.05f -> x / 0.05f
             x < 0.85f -> 1f
