@@ -1,28 +1,26 @@
 package com.example.countdown
 
-import android.Manifest
-import android.content.pm.PackageManager
+import android.content.ContentValues
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
@@ -44,27 +42,14 @@ class MainActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.progressBar)
         tvStatus = findViewById(R.id.tvStatus)
 
-        requestPermissions()
-
         btnGenerate.setOnClickListener { startGeneration() }
         btnDownload.setOnClickListener { downloadToTimerFolder() }
     }
 
-    private fun requestPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this,
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
-            }
-        }
-    }
-
     private fun startGeneration() {
-        val text = etSeconds.text.toString().trim()
-        val seconds = text.toIntOrNull()
+        val seconds = etSeconds.text.toString().toIntOrNull()
         if (seconds == null || seconds <= 0) {
-            Toast.makeText(this, "Enter a valid number of seconds", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Enter a valid number of seconds (e.g., 60)", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -72,15 +57,15 @@ class MainActivity : AppCompatActivity() {
         btnDownload.isEnabled = false
         progressBar.visibility = ProgressBar.VISIBLE
         progressBar.progress = 0
-        tvStatus.text = "Generating video..."
+        tvStatus.text = "Generating video (0%)..."
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val outFile = File(cacheDir, "countdown_${System.currentTimeMillis()}.mp4")
+                val outFile = File(cacheDir, "countdown_temp.mp4")
                 VideoGenerator(this@MainActivity).generate(seconds, outFile) { p ->
                     runOnUiThread {
                         progressBar.progress = p
-                        tvStatus.text = "Generating video... $p%"
+                        tvStatus.text = "Generating video ($p%)..."
                     }
                 }
                 lastGeneratedFile = outFile
@@ -107,41 +92,39 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            // Use app-specific external files dir -> /storage/emulated/0/Android/data/.../files/timer
-            // Then also copy to public /storage/emulated/0/timer on older APIs.
-            val appTimerDir = File(getExternalFilesDir(null), "timer").apply { mkdirs() }
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val destApp = File(appTimerDir, "countdown_$stamp.mp4")
-            copyFile(src, destApp)
+            val fileName = "countdown_$stamp.mp4"
 
-            // Try public folder on pre-Q
-            var publicPath = ""
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                val publicDir = File(Environment.getExternalStorageDirectory(), "timer")
-                publicDir.mkdirs()
-                val destPublic = File(publicDir, "countdown_$stamp.mp4")
-                copyFile(src, destPublic)
-                publicPath = destPublic.absolutePath
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Modern Android 10+ MediaStore approach (No permissions needed)
+                val resolver = contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/timer")
+                }
+                val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+                uri?.let {
+                    resolver.openOutputStream(it).use { outputStream ->
+                        FileInputStream(src).use { inputStream ->
+                            inputStream.copyTo(outputStream!!)
+                        }
+                    }
+                    Toast.makeText(this, "✅ Saved to Movies/timer/$fileName", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                // Android 9 and below fallback
+                val timerDir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "timer").apply { mkdirs() }
+                val dest = File(timerDir, fileName)
+                FileInputStream(src).use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
+                }
+                Toast.makeText(this, "✅ Saved to ${dest.absolutePath}", Toast.LENGTH_LONG).show()
             }
-
-            val msg = buildString {
-                append("Saved to:\n")
-                append(destApp.absolutePath)
-                if (publicPath.isNotEmpty()) append("\n$publicPath")
-            }
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             tvStatus.text = "✅ Downloaded to /timer folder"
         } catch (t: Throwable) {
             t.printStackTrace()
             Toast.makeText(this, "Save failed: ${t.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun copyFile(src: File, dst: File) {
-        FileInputStream(src).use { input ->
-            FileOutputStream(dst).use { output ->
-                input.copyTo(output)
-            }
         }
     }
 }
