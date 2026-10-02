@@ -1,6 +1,8 @@
 package com.example.countdown
 
+import android.Manifest
 import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -11,6 +13,8 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,7 +24,6 @@ import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
@@ -31,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
 
     private var lastGeneratedFile: File? = null
+    private val PERMISSION_REQUEST_CODE = 101
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +45,14 @@ class MainActivity : AppCompatActivity() {
         btnDownload = findViewById(R.id.btnDownload)
         progressBar = findViewById(R.id.progressBar)
         tvStatus = findViewById(R.id.tvStatus)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this,
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), PERMISSION_REQUEST_CODE)
+            }
+        }
 
         btnGenerate.setOnClickListener { startGeneration() }
         btnDownload.setOnClickListener { downloadToTimerFolder() }
@@ -91,12 +103,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Storage permission required to save video", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
         try {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val fileName = "countdown_$stamp.mp4"
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Modern Android 10+ MediaStore approach (No permissions needed)
                 val resolver = contentResolver
                 val contentValues = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -113,13 +132,15 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "✅ Saved to Movies/timer/$fileName", Toast.LENGTH_LONG).show()
                 }
             } else {
-                // Android 9 and below fallback
-                val timerDir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "timer").apply { mkdirs() }
-                val dest = File(timerDir, fileName)
+                @Suppress("DEPRECATION")
+                val publicDir = File(Environment.getExternalStorageDirectory(), "timer")
+                if (!publicDir.exists()) publicDir.mkdirs()
+                
+                val dest = File(publicDir, fileName)
                 FileInputStream(src).use { input ->
                     dest.outputStream().use { output -> input.copyTo(output) }
                 }
-                Toast.makeText(this, "✅ Saved to ${dest.absolutePath}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "✅ Saved to /storage/emulated/0/timer/$fileName", Toast.LENGTH_LONG).show()
             }
             tvStatus.text = "✅ Downloaded to /timer folder"
         } catch (t: Throwable) {
