@@ -47,7 +47,7 @@ class VideoGenerator(private val context: Context) {
         if (durationSeconds <= 0) return
         outputFile.delete()
 
-        // 1. Video Encoder
+        // 1. Video Encoder (Surface-based)
         val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
@@ -59,7 +59,7 @@ class VideoGenerator(private val context: Context) {
         val inputSurface = videoCodec.createInputSurface()
         videoCodec.start()
 
-        // 2. Audio Encoder
+        // 2. Audio Encoder (Buffer-based)
         val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT_RATE)
@@ -75,7 +75,7 @@ class VideoGenerator(private val context: Context) {
         var audioTrackIndex = -1
         var muxerStarted = false
 
-        // 4. Text Paint (160f ensures 2 lines fit perfectly in 480px height)
+        // 4. Text Paint (160f ensures perfect fit inside 480px height)
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             typeface = this@VideoGenerator.typeface
@@ -96,14 +96,41 @@ class VideoGenerator(private val context: Context) {
         try {
             while (!videoEosReceived || !audioEosReceived) {
                 
-                // --- FEED VIDEO ---
+                // --- DRAW & FEED VIDEO (Fixed: No dequeueInputBuffer for Surface) ---
                 if (!videoEosQueued) {
-                    val inIdx = videoCodec.dequeueInputBuffer(10000)
-                    if (inIdx >= 0) {
-                        val isEos = (frameIndex > totalFrames)
-                        val flags = if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                        videoCodec.queueInputBuffer(inIdx, 0, 0, (frameIndex * 1_000_000L) / FRAME_RATE, flags)
-                        if (isEos) videoEosQueued = true else frameIndex++
+                    val remainingSeconds = durationSeconds - (frameIndex / FRAME_RATE)
+                    val timeText = if (remainingSeconds > 0) {
+                        val m = remainingSeconds / 60
+                        val s = remainingSeconds % 60
+                        if (m > 0) String.format("%d:%02d", m, s) else s.toString()
+                    } else "0"
+                    val label = if (frameIndex == 0) "GET READY" else "SECONDS LEFT"
+                    val fullText = "$timeText\n$label"
+
+                    val surfaceCanvas = inputSurface.lockCanvas(null)
+                    surfaceCanvas.drawColor(Color.BLACK)
+                    
+                    val textAreaX = (VIDEO_WIDTH - TEXT_WIDTH) / 2f
+                    val textAreaY = (VIDEO_HEIGHT - TEXT_HEIGHT) / 2f
+
+                    val layout = StaticLayout.Builder
+                        .obtain(fullText, 0, fullText.length, paint, TEXT_WIDTH)
+                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                        .setLineSpacing(0f, 1.1f)
+                        .build()
+
+                    val layoutY = textAreaY + (TEXT_HEIGHT - layout.height) / 2f
+                    surfaceCanvas.save()
+                    surfaceCanvas.translate(textAreaX, layoutY)
+                    layout.draw(surfaceCanvas)
+                    surfaceCanvas.restore()
+                    inputSurface.unlockCanvasAndPost(surfaceCanvas)
+
+                    frameIndex++
+                    if (frameIndex > totalFrames) {
+                        // CRITICAL FIX: Correct way to signal EOS for Surface encoders
+                        MediaCodec.signalEndOfInputStream(inputSurface)
+                        videoEosQueued = true
                     }
                 }
 
@@ -113,7 +140,7 @@ class VideoGenerator(private val context: Context) {
                     if (inIdx >= 0) {
                         val inBuf = audioCodec.getInputBuffer(inIdx)!!
                         inBuf.clear()
-                        inBuf.order(ByteOrder.LITTLE_ENDIAN) // CRITICAL for Android AAC
+                        inBuf.order(ByteOrder.LITTLE_ENDIAN)
                         
                         val maxSamples = inBuf.remaining() / 2
                         val remaining = (totalAudioSamples - currentAudioSample).toInt()
@@ -150,37 +177,6 @@ class VideoGenerator(private val context: Context) {
                         audioCodec.queueInputBuffer(inIdx, 0, bytesWritten, timeUs, if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0)
                         if (isEos) audioEosQueued = true
                     }
-                }
-
-                // --- DRAW FRAME (Only if video not EOS) ---
-                if (!videoEosQueued) {
-                    val remainingSeconds = durationSeconds - ((frameIndex - 1) / FRAME_RATE)
-                    val timeText = if (remainingSeconds > 0) {
-                        val m = remainingSeconds / 60
-                        val s = remainingSeconds % 60
-                        if (m > 0) String.format("%d:%02d", m, s) else s.toString()
-                    } else "0"
-                    val label = if (frameIndex == 1) "GET READY" else "SECONDS LEFT"
-                    val fullText = "$timeText\n$label"
-
-                    val surfaceCanvas = inputSurface.lockCanvas(null)
-                    surfaceCanvas.drawColor(Color.BLACK)
-                    
-                    val textAreaX = (VIDEO_WIDTH - TEXT_WIDTH) / 2f
-                    val textAreaY = (VIDEO_HEIGHT - TEXT_HEIGHT) / 2f
-
-                    val layout = StaticLayout.Builder
-                        .obtain(fullText, 0, fullText.length, paint, TEXT_WIDTH)
-                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                        .setLineSpacing(0f, 1.1f)
-                        .build()
-
-                    val layoutY = textAreaY + (TEXT_HEIGHT - layout.height) / 2f
-                    surfaceCanvas.save()
-                    surfaceCanvas.translate(textAreaX, layoutY)
-                    layout.draw(surfaceCanvas)
-                    surfaceCanvas.restore()
-                    inputSurface.unlockCanvasAndPost(surfaceCanvas)
                 }
 
                 // --- DRAIN VIDEO ---
