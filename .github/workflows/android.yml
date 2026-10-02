@@ -7,14 +7,14 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04 # Pinned to prevent Ubuntu 26 migration surprises
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6 # Node 24 compatible
+        uses: actions/checkout@v6
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v6 # Node 24 compatible, replaces deprecated v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -29,7 +29,7 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v5 # Node 24 compatible
+        uses: actions/upload-artifact@v5
         with:
           name: countdown-video-apk
           path: app/build/outputs/apk/debug/app-debug.apk
